@@ -29,9 +29,14 @@ def main():
     run('git', 'config', 'user.name', 'github-actions[bot]')
     run('git', 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com')
     run('git', 'add', '--', 'upstream/observed.json')
-    if run('git','diff','--cached','--name-only'):
+    has_diff = bool(run('git','diff','--cached','--name-only'))
+    if has_diff:
         run('git', 'commit', '-m', 'chore: record Codex desktop release for compatibility review')
         run('git', 'push', 'origin', f'HEAD:refs/heads/{BRANCH}')
+    prior = json.loads(run('gh','pr','list','--head',BRANCH,'--state','all','--json','number'))
+    if not has_diff and prior:
+        print('Release already proposed; no PR edits or new commits')
+        return
     body = ('A new public Codex desktop release was detected. This PR updates the release observation only.\n\n'
             'Offline project tests passed in the updater job. Native CUA/UI compatibility has NOT been tested. '
             'Hash/schema acceptance guards are unchanged.\n\n'
