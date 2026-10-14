@@ -1,0 +1,6 @@
+{
+  "feed": "https://persistent.oaistatic.com/codex-app-prod/appcast.xml",
+  "releases": [],
+  "runtime_compatibility": "not_verified",
+  "meaning": "Initial baseline; the first scheduled/manual run records the current public release in a review PR."
+}

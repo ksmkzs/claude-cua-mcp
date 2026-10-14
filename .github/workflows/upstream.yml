@@ -1,0 +1,28 @@
+name: Watch Codex desktop updates
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: codex-upstream-update
+  cancel-in-progress: false
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm test
+      - run: python3 -m unittest discover -s tests
+      - run: python3 scripts/watch_upstream.py
+      - run: python3 scripts/open_update_pr.py
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -1,0 +1,9 @@
+{
+  "name": "claude-cua-appserver-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": { "test": "node --test test_bridge.mjs" }
+}
