@@ -1,5 +1,7 @@
 # Claude CUA MCP bridge
 
+English | [日本語](README.ja.md)
+
 Use an installed Codex desktop CUA runtime from Claude Code through a dedicated
 Codex app-server. Each Claude session/subagent gets its own REPL context. The
 bridge uses real host-created thread identifiers and does not start a Codex model
@@ -36,7 +38,9 @@ preparation reads an existing `codex-computer-use` entry in your Claude config.
 There is no dependency on a previously installed context profile.
 
 Preparation copies bridge code to `~/.codex/cua-claude-mcp`, generates a local
-routing-integrity key, and lists the runtime's tools. It does not call a UI tool,
+routing-integrity key, and lists the runtime's tools. Preparation sets
+`CUA_REPL_ENABLED_SURFACES=browser,computer`; the supplied launch configuration
+must support both surfaces. It does not call a UI tool,
 activate hooks, or start a model turn. Activation adds only the named MCP entry
 and its hooks, preserving other settings. Start a new Claude session afterward.
 
