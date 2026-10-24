@@ -4,11 +4,11 @@
   "releases": [
     {
       "architecture": "arm64",
-      "build": "21747",
-      "length": "750413976",
-      "published": "Fri, 23 Oct 2026 19:28:19 +0000",
-      "url": "https://persistent.oaistatic.com/codex-app-prod/ChatGPT-darwin-arm64-26.1021.22027.zip",
-      "version": "26.1021.22027"
+      "build": "21828",
+      "length": "750413801",
+      "published": "Sat, 24 Oct 2026 00:26:38 +0000",
+      "url": "https://persistent.oaistatic.com/codex-app-prod/ChatGPT-darwin-arm64-26.1021.31345.zip",
+      "version": "26.1021.31345"
     }
   ],
   "runtime_compatibility": "not_verified"
