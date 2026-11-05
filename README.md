@@ -8,7 +8,16 @@ bridge uses real host-created thread identifiers and does not start a Codex mode
 turn. This is an independent, experimental integration, not an official OpenAI
 Claude plugin.
 
+## Task-owned Safari windows (0.2)
+
+An existing installation can be upgraded to select a separate Safari main window for each signed client/session/agent context before forwarding CUA. Claude and Codex share the same relay and operation lock. Saved app references continue to work; the context-to-window mapping persists across bridge restarts while the window manager remains alive. See [task-window routing, limitations, and upgrade instructions](TASK-WINDOWS.md). Use the versioned upgrade path for an existing installation.
+
 ## Requirements
+
+Version 0.2.2 adds Codex `Stop` and `SubagentStop` hooks to close the matching
+owned Safari window automatically. Review and trust those two hooks in Codex,
+then reconnect the MCP server. Later Safari work starts with a fresh app binding.
+See [automatic close and its limits](TASK-WINDOWS.md#codex-automatic-close-022).
 
 - macOS with a CUA-capable Codex/ChatGPT desktop app, Python 3, and its bundled Node.
 - Claude Code supporting PreToolUse `updatedInput` and MCP lifecycle hooks.

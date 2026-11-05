@@ -9,11 +9,14 @@ export async function withLease(path, action, { signal, timeoutSeconds = 120 } =
   child.stdin.on('error', () => {});
   let released = false, errors = '';
   child.stderr.on('data', data => { errors = (errors + data).slice(-1000); });
-  const abort = () => { controller.abort(signal.reason); child.kill('SIGTERM'); };
+  // Cancellation must not release flock while the native executor is still
+  // running. The action performs cancellation/termination before finally.
+  const abort = () => { controller.abort(signal.reason); };
   if (signal?.aborted) abort();
   else signal?.addEventListener('abort', abort, { once: true });
   const lines = createInterface({ input: child.stdout });
   try {
+    if (signal?.aborted) throw signal.reason;
     await new Promise((resolve, reject) => {
       let acquired = false;
       child.once('error', reject);

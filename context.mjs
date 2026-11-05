@@ -13,12 +13,14 @@ export function cleanArguments(args) {
 }
 
 export function signContext(hook, key, now = Date.now()) {
-  if (!hook.session_id || !hook.prompt_id || !hook.tool_use_id) {
-    throw new Error('Claude hook did not supply session_id, prompt_id and tool_use_id. Update Claude Code; CUA call was not routed.');
+  const client = /^mcp__task_cua__/.test(hook.tool_name || '') ? 'codex' : 'claude';
+  const prompt = client === 'codex' ? hook.turn_id : hook.prompt_id;
+  if (!hook.session_id || !prompt || !hook.tool_use_id) {
+    throw new Error('Hook did not supply session, turn/prompt and tool-use identity; CUA call was not routed.');
   }
   const args = cleanArguments(hook.tool_input);
   const payload = {
-    session_id: hook.session_id, prompt_id: hook.prompt_id,
+    session_id: hook.session_id, prompt_id: prompt, client_kind: client,
     agent_id: hook.agent_id || '', cwd: hook.cwd,
     tool_use_id: hook.tool_use_id, tool_name: hook.tool_name,
     issued_at: now,
@@ -39,7 +41,8 @@ export function verifyContext(token, args, tool, key, now = Date.now()) {
   const context = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
   if (now - context.issued_at > 3600000 || context.issued_at > now + 30000) throw new Error('CUA session context expired. Make a fresh tool call.');
   if (context.arguments_sha256 !== createHash('sha256').update(stable(cleanArguments(args))).digest('hex')) throw new Error('CUA arguments changed after the routing hook');
-  if (context.tool_name !== `mcp__codex-computer-use__${tool}`) throw new Error('CUA routing context belongs to another tool');
+  const prefix = context.client_kind === 'codex' ? 'mcp__task_cua__' : 'mcp__codex-computer-use__';
+  if (context.tool_name !== prefix + tool) throw new Error('CUA routing context belongs to another tool');
   for (const field of ['session_id', 'prompt_id', 'tool_use_id', 'cwd']) {
     if (typeof context[field] !== 'string' || !context[field]) throw new Error(`Missing routing field: ${field}`);
   }

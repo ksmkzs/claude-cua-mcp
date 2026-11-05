@@ -69,7 +69,8 @@ def prepare():
     for path in [Path(NODE), Path(CODEX), Path(original['command'])]:
         if not path.is_file(): raise SystemExit(f'Required executable missing: {path}')
     for name in ['rpc.mjs', 'config.mjs', 'context.mjs', 'hook.mjs', 'lease.py', 'lease.mjs',
-                 'bridge.mjs', 'server.mjs', 'snapshot.mjs', 'package.json']:
+                 'bridge.mjs', 'server.mjs', 'snapshot.mjs', 'package.json', 'safari-windows.mjs',
+                 'codex-hook.mjs', 'window-maintenance.mjs', 'process-group.mjs', 'tool-schema.mjs']:
         src = HERE / name
         temp = ROOT / (name + '.install')
         shutil.copyfile(src, temp)

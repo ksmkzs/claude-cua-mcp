@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { JsonRpc, RpcError } from './rpc.mjs';
 import { loadConfig } from './config.mjs';
 import { CuaBridge } from './bridge.mjs';
+import { withRoutingContext } from './tool-schema.mjs';
 
 const root = process.env.CUA_BRIDGE_HOME || dirname(fileURLToPath(import.meta.url));
 const [config, key, snapshot] = await Promise.all([
@@ -20,10 +21,8 @@ const bridge = new CuaBridge({ root, config, key, tools: snapshot.tools,
 
 function tools() {
   const upstream = snapshot.tools.filter(t => ['js', 'js_reset'].includes(t.name)).map(t => ({ ...t,
-    description: t.description + '\nRuns through a dedicated Codex app-server thread using your configured CUA runtime. Session routing is supplied automatically by Claude hooks. Do not provide _bridge_context. After cancellation or an uncertain result, observe the current app state before further actions.',
-    inputSchema: { ...t.inputSchema, properties: { ...t.inputSchema.properties,
-      _bridge_context: { type: 'string', description: 'Internal routing value populated by the Claude PreToolUse hook. Omit from model-generated arguments.' },
-    } },
+    description: t.description + '\nRuns unchanged CUA through a task-scoped app-server context. Client hooks supply routing; omit _bridge_context. First reference Safari by its literal app name or bundle ID, e.g. cua.getApp("Safari"). The bridge then reselects and AX-checks that context’s owned Safari window around code and reset calls, including saved app objects, and parks it afterward. A completion_summary-only call reports the observed outcome without selecting, parking or closing a window. Keep Safari background; foreground Safari waits up to 30 seconds without activation. A user focus change during native input remains a race; failed checks never undo or replay input. Do not use the separate overlay tools or bypass this bridge with built-in CUA.',
+    inputSchema: withRoutingContext(t.inputSchema),
   }));
   return [...upstream, {
     name: 'bridge_status', description: 'Show CUA bridge connection and session status without observing or operating apps.',
@@ -37,6 +36,13 @@ function tools() {
     }, required: ['event', 'session_id'], additionalProperties: false },
     annotations: { idempotentHint: true, openWorldHint: false },
     _meta: { ui: { visibility: [] } },
+  }, {
+    name: 'codex_lifecycle', description: 'Host lifecycle hook only. Codex Stop/SubagentStop hooks call this automatically; do not call it from the model.',
+    inputSchema: {type:'object', properties:{
+      event:{type:'string',enum:['Stop','SubagentStop']}, session_id:{type:'string'},
+      turn_id:{type:'string'}, agent_id:{type:'string'},
+    }, required:['event','session_id'], additionalProperties:false},
+    annotations:{idempotentHint:true,openWorldHint:false}, _meta:{ui:{visibility:[]}},
   }];
 }
 
@@ -47,7 +53,7 @@ const rpc = new JsonRpc(process.stdin, process.stdout, {
       bridge.capabilities = params.capabilities ?? {};
       return { protocolVersion: ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'].includes(params.protocolVersion)
         ? params.protocolVersion : '2025-11-25', capabilities: { tools: {} },
-        serverInfo: { name: 'claude-cua-appserver-bridge', version: '0.1.0' } };
+        serverInfo: { name: 'claude-cua-appserver-bridge', version: '0.2.3' } };
     }
     if (!initialized) throw new RpcError('Initialize the MCP connection first', -32002);
     if (method === 'ping') return {};
@@ -58,6 +64,7 @@ const rpc = new JsonRpc(process.stdin, process.stdout, {
     try {
       if (params.name === 'bridge_status') return bridge.status();
       if (params.name === 'bridge_lifecycle') return await bridge.lifecycle(params.arguments ?? {});
+      if (params.name === 'codex_lifecycle') return await bridge.codexLifecycle(params.arguments ?? {});
       if (!['js', 'js_reset'].includes(params.name)) throw new RpcError(`Unknown CUA tool: ${params.name}`, -32602);
       return await bridge.call(params.name, params.arguments ?? {}, { signal: controller.signal, progressToken: params._meta?.progressToken });
     } catch (error) {

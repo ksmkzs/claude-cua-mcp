@@ -1,23 +1,27 @@
 import { spawn } from 'node:child_process';
-import { appendFile, readFile } from 'node:fs/promises';
+import { appendFile, readFile, writeFile, access } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { once } from 'node:events';
 import { JsonRpc, RpcError } from './rpc.mjs';
 import { appServerArgs } from './config.mjs';
 import { cleanArguments, stable, verifyContext } from './context.mjs';
 import { withLease } from './lease.mjs';
+import { SafariWindows } from './safari-windows.mjs';
+import { stopProcessGroup } from './process-group.mjs';
+import { validateJsArguments } from './tool-schema.mjs';
 
 const textResult = (text, isError = false) => ({ content: [{ type: 'text', text }], ...(isError ? { isError } : {}) });
-const contextKey = c => `${c.session_id}\0${c.agent_id || ''}`;
+const contextKey = c => `${c.client_kind || 'claude'}\0${c.session_id}\0${c.agent_id || ''}`;
 const present = value => typeof value === 'string' && value && !value.startsWith('${') ? value : '';
 
 export class CuaBridge {
-  constructor({ root, config, key, tools, clientRequest, clientNotify, capabilities = {}, spawnFn = spawn, lease = withLease }) {
+  constructor({ root, config, key, tools, clientRequest, clientNotify, capabilities = {}, spawnFn = spawn, lease = withLease, windows }) {
     Object.assign(this, { root, config, key, tools, clientRequest, clientNotify, capabilities, spawnFn, lease });
     this.contexts = new Map(); this.consumed = new Set(); this.queue = Promise.resolve();
     this.generation = 0; this.closed = false; this.active = null; this.ending = new Set(); this.endedSessions = new Set();
     this.instance = randomUUID();
+    this.windows = windows ?? (config.safariWindows ? new SafariWindows(config.safariWindows) : null);
+    this.quarantinePath = (config.operationLock || join(root, 'operation.lock')) + '.quarantine';
   }
 
   async audit(event, fields = {}) {
@@ -64,7 +68,7 @@ export class CuaBridge {
       }
     });
     try {
-      await rpc.request('initialize', { clientInfo: { name: 'claude_cua_bridge', title: 'Claude CUA bridge', version: '0.1.0' },
+      await rpc.request('initialize', { clientInfo: { name: 'claude_cua_bridge', title: 'Claude CUA bridge', version: '0.2.3' },
         capabilities: { experimentalApi: true } });
       rpc.notify('initialized');
       await this.audit('host_started', { generation });
@@ -112,6 +116,7 @@ export class CuaBridge {
       await this.start();
       const result = await this.rpc.request('thread/start', { cwd: c.cwd, ephemeral: true });
       context = { key, sessionId: c.session_id, agentId: c.agent_id, threadId: result.thread.id,
+        clientKind: c.client_kind || 'claude',
         turnId: null, endedTurns: new Set(), lost: false, cwd: c.cwd,
         approvalPolicy: result.approvalPolicy, sandbox: result.sandbox,
         generation: this.generation };
@@ -182,15 +187,16 @@ export class CuaBridge {
     if (this.consumed.has(requestKey)) throw new Error('Duplicate CUA request rejected. Make a fresh observation instead of replaying it.');
     this.consumed.add(requestKey);
     const clean = cleanArguments(args);
-    if (tool === 'js') {
-      if (typeof clean.code !== 'string' || !clean.code.trim()) throw new Error('code must be a nonempty string');
-      if (clean.timeout_ms !== undefined && (!Number.isInteger(clean.timeout_ms) || clean.timeout_ms < 1 || clean.timeout_ms > 300000)) throw new Error('timeout_ms must be between 1 and 300000');
-    }
+    const completion = tool === 'js' && validateJsArguments(clean) === 'completion';
     return this.serial(async () => {
       if (signal?.aborted) throw signal.reason;
-      if (this.closed || this.endedSessions.has(c.session_id) || this.ending.has(contextKey(c))) throw new Error('This Claude session is ending');
-      return this.lease(join(this.root, 'operation.lock'), async leaseSignal => {
+      if (this.closed || this.endedSessions.has(`${c.client_kind || 'claude'}\0${c.session_id}`) || this.ending.has(contextKey(c))) throw new Error('This CUA session is ending');
+      return this.lease(this.config.operationLock || join(this.root, 'operation.lock'), async leaseSignal => {
         if (leaseSignal.aborted) throw leaseSignal.reason;
+        try {
+          await access(this.quarantinePath);
+          throw new Error('A previous CUA executor may still be running. Inspect the quarantine record before using this bridge.');
+        } catch (error) { if (error.code !== 'ENOENT') throw error; }
         const context = await this.getContext(c);
         if (leaseSignal.aborted) throw leaseSignal.reason;
         const aborter = new AbortController();
@@ -198,9 +204,18 @@ export class CuaBridge {
         leaseSignal.addEventListener('abort', cancel, { once: true });
         const active = { context, signal: aborter.signal, aborter, progressToken, progress: 0, warnings: [] };
         this.active = active;
-        await this.audit('call_started', { threadId: context.threadId, turnId: context.turnId,
-          generation: context.generation, callId: c.tool_use_id, tool });
+        let windowLease = null, dispatched = false, nativeResult = null, safeToSettle = true;
         try {
+          // A completion headline is metadata, not a UI operation. Forward it
+          // unchanged without restoring/selecting/parking a Safari window.
+          if (!completion) windowLease = await this.windows?.acquire(context, tool === 'js' ? clean.code : '', { signal: aborter.signal });
+          if (aborter.signal.aborted) throw aborter.signal.reason;
+          await this.audit('call_started', { threadId: context.threadId, turnId: context.turnId,
+            generation: context.generation, callId: c.tool_use_id, tool, safariBound: !!windowLease });
+          if (windowLease) await windowLease.check();
+          if (aborter.signal.aborted) throw aborter.signal.reason;
+          dispatched = true;
+          safeToSettle = false;
           const result = await this.rpc.request('mcpServer/tool/call', {
             threadId: context.threadId, server: 'claude_cua', tool, arguments: clean,
             _meta: { 'x-codex-turn-metadata': {
@@ -210,17 +225,60 @@ export class CuaBridge {
               client_name: 'claude_cua_bridge',
             } },
           }, { timeoutMs: Math.max(120000, (clean.timeout_ms ?? 30000) + 60000), signal: aborter.signal });
+          nativeResult = result;
+          safeToSettle = true;
+          if (windowLease) await windowLease.check();
           await this.audit('call_finished', { threadId: context.threadId, tool, isError: !!result.isError });
           if (active.warnings.length) result.content.push(...active.warnings.map(text => ({ type: 'text', text })));
           return result;
         } catch (error) {
           await this.audit('call_interrupted', { threadId: context.threadId, tool });
-          // No retry of a possibly executed UI action. Try normal cleanup, then stop only our host.
-          try { await this.finishTurn(context, 'Interrupt'); } catch { /* Outcome remains unconfirmed. */ }
-          await this.stopHost();
-          throw new Error(`${error.message}. CUA state was discarded; observe the app before attempting another action.`);
+          if (!dispatched && error.code === 'OWNED_WINDOW_CLOSED') {
+            context.lost = true;
+            await this.rpc.request('thread/unsubscribe', {threadId:context.threadId}, {timeoutMs:10000});
+            this.contexts.delete(context.key);
+          }
+          if (dispatched) {
+            // Stop the executor BEFORE settling its window lease or releasing flock.
+            try { await this.finishTurn(context, 'Interrupt'); } catch { /* Outcome remains unconfirmed. */ }
+            try { await this.stopHost(); safeToSettle = true; }
+            catch (stopError) {
+              await writeFile(this.quarantinePath, JSON.stringify({
+                reason: 'executor_termination_unconfirmed', at: new Date().toISOString(),
+                threadId: context.threadId,
+              }) + '\n', { mode: 0o600 });
+              throw stopError;
+            }
+            throw new Error(`${error.message}. CUA state was discarded; observe the app before attempting another action.`);
+          }
+          throw error;
         } finally {
-          this.active = null; leaseSignal.removeEventListener('abort', cancel);
+          try {
+            if (windowLease) {
+              if (!safeToSettle) {
+                await windowLease.quarantine();
+              } else {
+              try {
+                const settled = await windowLease.settle();
+                await this.audit('safari_settled', { threadId: context.threadId,
+                  parked: settled?.parked === true, deferred: settled?.deferred ?? null });
+                if (settled?.deferred && nativeResult) nativeResult.content.push({
+                  type: 'text', text: `Safari window parking deferred: ${settled.deferred}.` });
+              } catch (error) {
+                await this.audit('safari_settle_failed', { threadId: context.threadId });
+                if (nativeResult) {
+                  // Preserve the native outcome: never invite replay by hiding
+                  // a completed action behind a later cleanup error.
+                  nativeResult.isError = true;
+                  nativeResult.content.push({ type: 'text',
+                    text: `Native CUA returned before window cleanup failed: ${error.message}. Do not replay the native action; inspect the owned window.` });
+                } else throw error;
+              }
+              }
+            }
+          } finally {
+            this.active = null; leaseSignal.removeEventListener('abort', cancel);
+          }
         }
       }, { signal });
     });
@@ -230,52 +288,109 @@ export class CuaBridge {
     const sessionId = present(args.session_id), agentId = present(args.agent_id), promptId = present(args.prompt_id);
     const event = args.event;
     if (!sessionId || !['Stop', 'StopFailure', 'SubagentStop', 'SessionEnd'].includes(event)) return textResult('{}');
-    if (event === 'SessionEnd') this.endedSessions.add(sessionId);
-    if (event === 'SubagentStop') this.ending.add(`${sessionId}\0${agentId}`);
-    const contexts = [...this.contexts.values()].filter(c => c.sessionId === sessionId
+    if (event === 'SessionEnd') this.endedSessions.add(`claude\0${sessionId}`);
+    if (event === 'SubagentStop') this.ending.add(`claude\0${sessionId}\0${agentId}`);
+    const contexts = [...this.contexts.values()].filter(c => c.clientKind === 'claude' && c.sessionId === sessionId
       && (event === 'SessionEnd' || c.agentId === agentId)
-      && (!promptId || event === 'SessionEnd' || c.turnId === promptId));
+      && (!promptId || ['SessionEnd', 'SubagentStop'].includes(event) || c.turnId === promptId));
     if (event === 'SessionEnd') for (const context of contexts) this.ending.add(context.key);
     if (contexts.includes(this.active?.context)) this.active.aborter.abort(new Error(`Claude ${event}`));
     await this.serial(async () => {
-      const latest = [...this.contexts.values()].filter(c => c.sessionId === sessionId
+      const latest = [...this.contexts.values()].filter(c => c.clientKind === 'claude' && c.sessionId === sessionId
         && (event === 'SessionEnd' || c.agentId === agentId)
-        && (!promptId || event === 'SessionEnd' || c.turnId === promptId));
+        && (!promptId || ['SessionEnd', 'SubagentStop'].includes(event) || c.turnId === promptId));
       await this.audit('lifecycle_matched', { hookEvent: event, matchedContexts: latest.length,
         source: createHash('sha256').update(`${sessionId}\0${agentId}`).digest('hex').slice(0, 16),
         turnId: promptId || null });
+      const ending = event === 'SessionEnd' || event === 'SubagentStop';
+      const unsafeKeys = [];
       for (const context of latest) {
-        await this.finishTurn(context, event === 'StopFailure' ? 'Interrupt' : event);
-        if (event === 'SessionEnd' || event === 'SubagentStop') {
-          if (!context.lost) await this.rpc.request('thread/unsubscribe', { threadId: context.threadId }, { timeoutMs: 10000 });
-          this.contexts.delete(context.key);
+        try {
+          await this.finishTurn(context, event === 'StopFailure' ? 'Interrupt' : event);
+          if (ending) {
+            if (!context.lost) await this.rpc.request('thread/unsubscribe', { threadId: context.threadId }, { timeoutMs: 10000 });
+            this.contexts.delete(context.key);
+          }
+        } catch (error) {
+          if (!ending) throw error;
+          unsafeKeys.push(context.key);
+          await this.audit('lifecycle_executor_cleanup_failed', { threadId: context.threadId });
         }
+      }
+      if (ending && this.windows) {
+        await this.lease(this.config.operationLock || join(this.root, 'operation.lock'), async () => {
+          const results = await this.windows.cleanupScope({ client: 'claude', sessionId,
+            agentId: event === 'SessionEnd' ? undefined : agentId,
+            knownKeys: latest.map(c => c.key), unsafeKeys });
+          await this.audit('lifecycle_window_cleanup', { hookEvent: event, results });
+        });
       }
       if (event === 'SessionEnd' && this.contexts.size === 0) await this.stopHost();
     });
     return textResult('{}');
   }
 
+  async codexLifecycle(args) {
+    const sessionId = present(args.session_id), agentId = present(args.agent_id);
+    const turnId = present(args.turn_id), event = args.event;
+    if (!sessionId || !['Stop', 'SubagentStop'].includes(event)
+      || (event === 'Stop' && !turnId) || (event === 'SubagentStop' && !agentId)) return textResult('{}');
+    // SubagentStop carries the parent's session_id and the child's agent_id.
+    // Tool hooks in a child normally use its own session_id; also support
+    // hosts that authenticate the child as (parent session, agent id).
+    const scopes = event === 'Stop' ? [{sessionId, agentId:'', turnId}] :
+      [{sessionId:agentId, agentId:''}, {sessionId, agentId}];
+    return this.serial(async () => {
+      try {
+        await access(this.quarantinePath);
+        await this.audit('lifecycle_cleanup_deferred', {client:'codex', hookEvent:event,
+          reason:'executor_termination_unconfirmed', manual:true});
+        return textResult('{}');
+      } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      for (const scope of scopes) {
+        const matches = c => c.clientKind === 'codex' && c.sessionId === scope.sessionId
+          && c.agentId === scope.agentId && (!scope.turnId || c.turnId === scope.turnId);
+        const contexts = [...this.contexts.values()].filter(matches);
+        const unsafeKeys = [];
+        for (const context of contexts) {
+          try {
+            await this.finishTurn(context, event);
+            if (!context.lost) await this.rpc.request('thread/unsubscribe', {threadId:context.threadId}, {timeoutMs:10000});
+            // Discard saved app references before closing their window. A later
+            // user turn (or review-hook continuation) gets a fresh REPL/window.
+            this.contexts.delete(context.key);
+          } catch { unsafeKeys.push(context.key); }
+        }
+        if (this.windows) await this.lease(this.config.operationLock || join(this.root, 'operation.lock'), async () => {
+          const results = await this.windows.cleanupScope({client:'codex', ...scope,
+            knownKeys:contexts.map(c=>c.key), unsafeKeys});
+          await this.audit('lifecycle_window_cleanup', {client:'codex', hookEvent:event, results});
+        });
+      }
+      return textResult('{}');
+    });
+  }
+
   status() {
-    return textResult(JSON.stringify({ bridge: '0.1.0', hostRunning: !!this.rpc && !this.rpc.closed,
+    return textResult(JSON.stringify({ bridge: '0.2.3', hostRunning: !!this.rpc && !this.rpc.closed,
       documentationProfile: this.config.cua.env.CUA_REPL_NODE_REPL_PATH,
       enabledSurfaces: this.config.cua.env.CUA_REPL_ENABLED_SURFACES,
       contexts: [...this.contexts.values()].map(c => ({ threadId: c.threadId, lost: c.lost,
         approvalPolicy: c.approvalPolicy, turnEnded: c.endedTurns.has(c.turnId) })),
       active: !!this.active,
-      concurrency: 'Claude bridge operations are serialized; desktop Codex/user coexistence depends on the native host.',
+      safariWindowRouting: !!this.windows,
+      concurrency: 'Bridge operations share a file lock. Bound Safari contexts are selected and AX-checked around each call; human focus changes during input remain possible.',
     }));
   }
 
   async stopHost() {
     const child = this.child;
-    this.child = null;
-    if (!child || !child.pid || child.exitCode !== null || child.signalCode) return;
-    const exited = once(child, 'exit').catch(() => {});
+    if (!child || !child.pid) return;
+    if (child.groupStop) return child.groupStop;
     // The detached process group contains only this bridge's app-server and its children.
-    try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
-    const timer = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } }, 3000);
-    await exited; clearTimeout(timer);
+    child.groupStop = stopProcessGroup(child.pid);
+    await child.groupStop;
+    if (this.child === child) this.child = null;
     for (const context of this.contexts.values()) context.lost = true;
   }
 
