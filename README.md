@@ -1,123 +1,84 @@
-# Claude CUA MCP bridge
+# claude-cua-mcp
 
-English | [日本語](README.ja.md)
+[日本語](README.ja.md)
 
-Use an installed Codex desktop CUA runtime from Claude Code through a dedicated
-Codex app-server. Each Claude session/subagent gets its own REPL context. The
-bridge uses real host-created thread identifiers and does not start a Codex model
-turn. This is an independent, experimental integration, not an official OpenAI
-Claude plugin.
+Use the Computer Use (CUA) runtime of the installed Codex desktop app from Claude Code.
+It is not an OpenAI or Anthropic product.
 
-## Task-owned Safari windows (0.2)
+The runtime inside the desktop app is an ordinary MCP stdio server. This repository starts that same,
+unmodified server for Claude Code, with the launch settings the desktop app writes for itself:
 
-An existing installation can be upgraded to select a separate Safari main window for each signed client/session/agent context before forwarding CUA. Claude and Codex share the same relay and operation lock. Saved app references continue to work; the context-to-window mapping persists across bridge restarts while the window manager remains alive. See [task-window routing, limitations, and upgrade instructions](TASK-WINDOWS.md). Use the versioned upgrade path for an existing installation.
-
-## Requirements
-
-Version 0.2.2 adds Codex `Stop` and `SubagentStop` hooks to close the matching
-owned Safari window automatically. Review and trust those two hooks in Codex,
-then reconnect the MCP server. Later Safari work starts with a fresh app binding.
-See [automatic close and its limits](TASK-WINDOWS.md#codex-automatic-close-022).
-
-- macOS with a CUA-capable Codex/ChatGPT desktop app, Python 3, and its bundled Node.
-- Claude Code supporting PreToolUse `updatedInput` and MCP lifecycle hooks.
-- A working CUA MCP launch configuration for your installed runtime. The bridge
-  does not provision browser/native backend services or grant OS permissions.
-
-No runtime, vendor tool descriptions, credentials, user configuration, or diagnostic
-transcripts are distributed. Tool schemas are collected locally during preparation.
-Our code and synthetic tests are MIT licensed. Vendor components retain their own
-terms. The [context profile](https://github.com/ksmkzs/cua-context-profile) is optional.
-
-## Prepare
-
-Export your working CUA MCP stanza into a **local, uncommitted** JSON file with
-`command`, `args` and `env`. Preserve the runtime's required host/backend environment.
-Do not copy another user's machine-specific settings. This file may contain private
-configuration; keep it outside the repository.
-
-```sh
-python3 install.py --prepare --app /Applications/Codex.app --cua-config /path/to/local-cua.json
-python3 install.py --activate --app /Applications/Codex.app
+```
+Claude Code ── MCP (stdio) ── launch ── [cua-proxy, if installed] ── node_repl (inside ChatGPT.app / Codex.app)
+                                                                            └─ the app's own Computer Use service
 ```
 
-Use `/Applications/ChatGPT.app` when appropriate; `--app` also supports arbitrary
-bundle locations and defaults to common Applications paths. Without `--cua-config`,
-preparation reads an existing `codex-computer-use` entry in your Claude config.
-There is no dependency on a previously installed context profile.
+There is no bridge process, no copy of the runtime and no saved schema: the settings are read from the
+desktop app's own plugin configuration at every start, so an app update needs nothing done here.
 
-Preparation copies bridge code to `~/.codex/cua-claude-mcp`, generates a local
-routing-integrity key, and lists the runtime's tools. Preparation sets
-`CUA_REPL_ENABLED_SURFACES=browser,computer`; the supplied launch configuration
-must support both surfaces. It does not call a UI tool,
-activate hooks, or start a model turn. Activation adds only the named MCP entry
-and its hooks, preserving other settings. Start a new Claude session afterward.
+## What you get
 
-Advanced paths: `--root`, `--claude-config`, and `--claude-settings`. Use the same
-arguments for prepare/activate/restore. Preparation refuses an existing configured
-installation; prepare in a new directory when reviewing an update. Do not delete a
-live installation or its activation record to force an upgrade.
+- The tools the Codex app enables for itself: `js`, `js_reset`, `turn_ended`.
+- **Approvals as in Codex.** "Allow Computer Use to use …?" arrives as a standard MCP elicitation and is
+  shown by Claude Code. Nothing is approved on your behalf.
+- **The same limits.** Apps the runtime refuses (terminals, the desktop app itself, …) stay refused; that
+  decision is made by the vendor's service, which this does not touch.
+- Desktop apps only by default. The browser surfaces (the in-app browser, the Chrome plug-in) belong to
+  the Codex app's own window and conversation. `CLAUDE_CUA_SURFACES=browser,computer` passes them through
+  if you want to try.
+
+With [cua-context-profile](https://github.com/ksmkzs/cua-context-profile) installed, the launcher runs its
+proxy in front of the runtime: shorter reference text, a session identity for the runtime, and, with
+[safari-window-mcp](https://github.com/ksmkzs/safari-window-mcp), a Safari window of the session's own.
+Both are optional.
+
+## What this depends on
+
+The runtime in current desktop app builds (checked on 26.1103) controls apps only when the program that
+starts it is signed by OpenAI; started from anything else it can list apps but fails to bind one ("Sky
+Computer Use native pipe startup failed"). The launcher therefore starts it from the Node that ships inside the app. That is how it works today, not a
+promise: if the vendor narrows this, this stops working and the remaining route is the app's documented `codex app-server` interface.
+
+## Install
+
+Requires macOS, the Codex desktop app opened at least once with Computer Use enabled, and Claude Code.
 
 ```sh
-python3 install.py --restore --app /Applications/Codex.app
+sh install.sh                 # add the MCP server "codex-computer-use", a turn-end hook and one deny rule
+sh install.sh install --replace   # replace an existing server of the same name
+sh install.sh uninstall
 ```
 
-Restore reinstates the prior MCP entry or removes the entry if none existed, and
-removes only the installed hooks. Changed configuration is preserved by refusing
-ambiguous overwrites. No desktop app or active Claude session is forcibly restarted.
+The installer uses `claude mcp add` for the server and edits `~/.claude/settings.json` for two things only
+(a backup is written to `~/.local/share/claude-cua/backup/` first):
 
-## Operation
+- `Stop` / `StopFailure` hooks that call `turn_ended`, so the runtime releases its on-screen cursor when a
+  turn ends, as it does in Codex;
+- a deny rule for `js_add_node_module_dir`, a tool the Codex app never shows to a model.
 
-Use `js` and `js_reset` and follow the actual first-call documentation. The optional
-context profile's `cua.documentation()` is not assumed to exist. Claude's PreToolUse
-hook supplies signed routing context; do not generate `_bridge_context` yourself.
+Start a new Claude Code session afterwards.
 
-Stop/StopFailure/SubagentStop/SessionEnd notify the matching runtime context.
-Cancellation discards the dedicated host when necessary. An operation with an
-uncertain result is never replayed automatically; reacquire UI state before acting.
-The file lock serializes these bridge processes only, not desktop or human activity.
+## When the desktop app is updated
 
-Supported approval forms/URLs are forwarded to Claude; unsupported requests are
-declined. Existing host approval/sandbox settings are preserved. The bridge does
-not assert that an acknowledged `turn_ended` RPC means the native cursor disappeared.
-Native cursor persistence is an unresolved upstream behavior.
+- **The Codex app does not have to be running.** The launcher starts a new runtime, and the runtime starts the Computer Use service itself (checked with 26.1111).
+- **A session that was running before the update must reconnect.** A runtime started before the app was updated can no longer reach the new version's service: app calls fail with "Sky Computer Use native pipe startup failed" (seen on the update from 26.1105 to 26.1111). Reconnect this server from `/mcp` in Claude Code, or start a new session. With cua-context-profile installed, the error comes with a note saying so.
+- **Checking after an update.** `sh check.sh` checks, against the app on this Mac, that a new runtime starts and answers, that the tools are the ones the app enables for itself, that apps are listed without an error and, with cua-context-profile, that the filter loads, the shortened documentation is returned and the entry points are still in it. `sh check.sh --record` keeps the result in `upstream/verified.json`.
+- GitHub Actions (`upstream.yml`) records new public releases every six hours and opens a draft pull request for review. CI cannot run the macOS app, so compatibility is checked by running `check.sh` on a Mac.
 
-`events.jsonl` records IDs and outcome flags, not code, screen content, or approval
-payloads. It is local and may identify sessions. Rotation is not implemented; remove
-it only after all bridge sessions have ended. Never commit the state directory.
+## Notes
 
-## Verification
+- One Claude Code session is one runtime session; its subagents share it.
+- Operating-system permissions belong to the app that runs Claude Code (for example the terminal).
+- `CLAUDE_CUA_RUNTIME=/path/to/node_repl` selects a specific runtime; `CODEX_APP=/path/to/App.app` a
+  specific desktop app.
+- Whether a given use fits the terms of the software involved is for you to judge. This starts the vendor's
+  server as shipped and leaves its approvals and restrictions in place.
+
+## Tests
 
 ```sh
 npm test
-python3 -m unittest discover -s tests
+python3 -m unittest discover -s tests      # update watcher
 ```
 
-Tests use synthetic host/tool fixtures: routing, agent isolation, approval forwarding,
-schema drift, cancellation, locks, and lifecycle acknowledgements. They do not claim
-end-to-end GUI compatibility. Test a new installation with a read-only CUA observation
-before relying on it for actions. Browser support depends on your configured host.
-
-The bridge compares required runtime tool schemas against its locally captured
-snapshot. Schema drift stops execution. A fresh snapshot is not proof of semantic
-compatibility; review the changes and test the integration before adopting it.
-
-## Automatic update PRs
-
-The public production desktop appcast is checked every six hours by GitHub Actions.
-A new release creates or refreshes one Draft PR with `upstream/observed.json` after
-offline tests pass. No new release means no new commit/PR. This detects public releases
-independently of the maintainer's Mac. Account-specific/beta releases may differ.
-
-The PR is an actionable compatibility-review request, not a claim that an arbitrary
-breaking change has been repaired. Runtime schemas, guard acceptance and activation
-are not updated automatically. Native smoke tests remain manual.
-
-Enable GitHub Actions PR creation in repository Actions settings. Only the standard
-repository `GITHUB_TOKEN` is used; no API key is needed. Scheduled jobs can be delayed
-or disabled under GitHub's inactivity policies. Tests on pull requests have read-only
-permissions; no privileged `pull_request_target` workflow is used.
-
-References: [Codex app-server](https://learn.chatgpt.com/docs/app-server),
-[Claude hooks](https://code.claude.com/docs/en/hooks),
-[production appcast](https://persistent.oaistatic.com/codex-app-prod/appcast.xml).
+MIT licence.

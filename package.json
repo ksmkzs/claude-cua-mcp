@@ -1,9 +1,11 @@
 {
-  "name": "claude-cua-appserver-bridge",
-  "version": "0.2.3",
+  "name": "claude-cua-mcp",
+  "version": "1.0.0",
   "private": true,
-  "license": "MIT",
   "type": "module",
+  "license": "MIT",
   "engines": { "node": ">=22" },
-  "scripts": { "test": "node --test test_bridge.mjs test_safari_windows.mjs" }
+  "scripts": {
+    "test": "node --test --test-force-exit --test-timeout=20000 test/*.test.mjs"
+  }
 }
