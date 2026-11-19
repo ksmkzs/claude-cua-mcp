@@ -1,0 +1,45 @@
+{
+  "meaning": "Results of check.sh on a Mac with the named desktop app version. Newest first.",
+  "history": [
+    {
+      "checked": "2026-11-19T14:29:40.467Z",
+      "version": "26.1111.71704",
+      "build": "29030",
+      "launcher": "installed",
+      "profile": true,
+      "checks": [
+        {
+          "name": "a new runtime starts and answers",
+          "ok": true,
+          "detail": "ok"
+        },
+        {
+          "name": "tools are the ones the app enables for itself",
+          "ok": true,
+          "detail": "js,js_reset,turn_ended"
+        },
+        {
+          "name": "apps are listed without an error",
+          "ok": true,
+          "detail": "14 apps"
+        },
+        {
+          "name": "the documentation filter loads",
+          "ok": true,
+          "detail": "ok"
+        },
+        {
+          "name": "the shortened documentation is given",
+          "ok": true,
+          "detail": "14243 characters with the profile, 19845 without"
+        },
+        {
+          "name": "the entry points are still in the shortened documentation",
+          "ok": true,
+          "detail": "getState, getAXState, cua_repl"
+        }
+      ],
+      "compatible": true
+    }
+  ]
+}
